@@ -80,6 +80,9 @@ static struct ev_timer *clear_indicator_timeout;
 static struct ev_timer *discard_passwd_timeout;
 extern unlock_state_t unlock_state;
 extern auth_state_t auth_state;
+//char *pam_msg = NULL;
+char *pam_msg;
+int pam_msg_count = 0;
 int failed_attempts = 0;
 bool show_failed_attempts = false;
 bool retry_verification = false;
@@ -225,6 +228,7 @@ static void finish_input(void) {
     password[input_position] = '\0';
     unlock_state = STATE_KEY_PRESSED;
     redraw_screen();
+    printf("FINISH_INPUT...\n");
     input_done();
 }
 
@@ -308,6 +312,9 @@ static void input_done(void) {
 
     if (debug_mode)
         fprintf(stderr, "Authentication failure\n");
+
+    // show only pam msg count on each iteration of a failed pam authentication
+    pam_msg_count = 0;
 
     /* Get state of Caps and Num lock modifiers, to be displayed in
      * STATE_AUTH_WRONG state */
@@ -429,6 +436,7 @@ static void handle_key_press(xcb_key_press_event_t *event) {
         case XKB_KEY_Return:
         case XKB_KEY_KP_Enter:
         case XKB_KEY_XF86ScreenSaver:
+            printf("TRIGGER...\n");
             if ((ksym == XKB_KEY_j || ksym == XKB_KEY_m) && !ctrl)
                 break;
 
@@ -443,6 +451,7 @@ static void handle_key_press(xcb_key_press_event_t *event) {
             }
             finish_input();
             skip_repeated_empty_password = true;
+            printf("TRIGGER... END\n");
             return;
         default:
             skip_repeated_empty_password = false;
@@ -819,34 +828,69 @@ static bool verify_png_image(const char *image_path) {
 
 #ifndef __OpenBSD__
 /*
- * Callback function for PAM. We only react on password request callbacks.
+ * Callback function for PAM.
  *
  */
 static int conv_callback(int num_msg, const struct pam_message **msg,
                          struct pam_response **resp, void *appdata_ptr) {
-    if (num_msg == 0)
-        return 1;
+    printf("CONV_CALLBACK\n");
+    if (num_msg <= 0 || num_msg > 1)
+        return PAM_CONV_ERR;
 
     /* PAM expects an array of responses, one for each message */
     if ((*resp = calloc(num_msg, sizeof(struct pam_response))) == NULL) {
         perror("calloc");
-        return 1;
+        return PAM_BUF_ERR;
     }
 
     for (int c = 0; c < num_msg; c++) {
-        if (msg[c]->msg_style != PAM_PROMPT_ECHO_OFF &&
-            msg[c]->msg_style != PAM_PROMPT_ECHO_ON)
-            continue;
+        DEBUG("i3lock: PAM message %d, message style: %d, message: %s\n", c, msg[c]->msg_style, msg[c]->msg);
 
         /* return code is currently not used but should be set to zero */
         resp[c]->resp_retcode = 0;
+        resp[c]->resp = NULL;
+
+        if (msg[c] != NULL && msg[c]->msg != NULL) {
+            pam_msg = strdup((msg[c])->msg);
+        }
+
+        switch(msg[c]->msg_style) {
+            case PAM_PROMPT_ECHO_OFF:
+                printf("PAM_PROMPT_ECHO_OFF\n");
+                break;
+            case PAM_PROMPT_ECHO_ON:
+                printf("EFF: %s\n", pam_msg);
+                redraw_screen();
+                break;
+
+            case PAM_ERROR_MSG:
+                printf("PAM_ERROR_MSG...\n");
+                break;
+            case PAM_TEXT_INFO:
+                printf("TODO: %s\n", pam_msg);
+                auth_state = STATE_PAM_UNKNOWN;
+                pam_msg_count += 1;
+                redraw_screen();
+                break;
+
+            default:
+                DEBUG("Unsupported PAM message style %d\n", msg[c]->msg_style);
+                break;
+        }
+
+        // Only submit the password when asked for input
+        if (msg[c]->msg_style != PAM_PROMPT_ECHO_OFF &&
+           msg[c]->msg_style != PAM_PROMPT_ECHO_ON)
+            continue;
+
         if ((resp[c]->resp = strdup(password)) == NULL) {
             perror("strdup");
             return 1;
         }
+
     }
 
-    return 0;
+    return PAM_SUCCESS;
 }
 #endif
 
@@ -997,6 +1041,9 @@ static void raise_loop(xcb_window_t window) {
                 if (((xcb_destroy_notify_event_t *)event)->window == window)
                     exit(EXIT_SUCCESS);
                 break;
+            case XCB_MAPPING_NOTIFY:
+                DEBUG("Unhandled event type XCB_MAPPING_NOTIFY\n");
+                break;
             default:
                 DEBUG("Unhandled event type %d\n", type);
                 break;
@@ -1115,8 +1162,23 @@ int main(int argc, char *argv[]) {
     if ((ret = pam_start("i3lock", username, &conv, &pam_handle)) != PAM_SUCCESS)
         errx(EXIT_FAILURE, "PAM: %s", pam_strerror(pam_handle, ret));
 
+
     if ((ret = pam_set_item(pam_handle, PAM_TTY, getenv("DISPLAY"))) != PAM_SUCCESS)
         errx(EXIT_FAILURE, "PAM: %s", pam_strerror(pam_handle, ret));
+
+    // authenticate so we trigger the call back & get the user prompt
+//    if ((ret = pam_authenticate(pam_handle, 0) != PAM_SUCCESS) != PAM_SUCCESS)
+//        errx(EXIT_FAILURE, "PAM: %s", pam_strerror(pam_handle, ret));
+
+    // get prompt
+    //const void *promptp = NULL;
+    //if ((ret = pam_get_item(pam_handle, PAM_USER_PROMPT, &promptp)) != PAM_SUCCESS)
+    //    errx(EXIT_FAILURE, "PAM: %s", pam_strerror(pam_handle, ret));
+    //ret = pam_get_item(pam_handle, PAM_USER_PROMPT, &promptp);
+    //ret = pam_get_item(pam_handle, PAM_TTY, &promptp);
+    //printf("DEBUG return: %d\n", ret);
+
+    //printf("DEBUG: %s\n", (char*) promptp);
 #endif
 
 /* Using mlock() as non-super-user seems only possible in Linux.

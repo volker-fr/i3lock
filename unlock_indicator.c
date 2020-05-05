@@ -15,6 +15,7 @@
 #include <ev.h>
 #include <cairo.h>
 #include <cairo/cairo-xcb.h>
+#include <unistd.h>
 
 #include "i3lock.h"
 #include "xcb.h"
@@ -62,6 +63,13 @@ extern bool show_failed_attempts;
 /* Number of failed unlock attempts. */
 extern int failed_attempts;
 
+/* Number of pam messages received */
+extern int pam_msg_count;
+
+/* Message we receive from PAM */
+extern char *pam_msg;
+
+
 /*******************************************************************************
  * Variables defined in xcb.c.
  ******************************************************************************/
@@ -98,12 +106,16 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
     bg_pixmap = create_bg_pixmap(conn, screen, resolution, color);
     /* Initialize cairo: Create one in-memory surface to render the unlock
      * indicator on, create one XCB surface to actually draw (one or more,
-     * depending on the amount of screens) unlock indicators on. */
+     * depending on the amount of screens) unlock indicators on. Create
+     * a third for potential messages. */
     cairo_surface_t *output = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, button_diameter_physical, button_diameter_physical);
     cairo_t *ctx = cairo_create(output);
 
     cairo_surface_t *xcb_output = cairo_xcb_surface_create(conn, bg_pixmap, vistype, resolution[0], resolution[1]);
     cairo_t *xcb_ctx = cairo_create(xcb_output);
+
+    cairo_surface_t *pam_output = cairo_xcb_surface_create(conn, bg_pixmap, vistype, resolution[0], resolution[1]);
+    cairo_t *pam_ctx = cairo_create(pam_output);
 
     if (img) {
         if (!tile) {
@@ -131,6 +143,45 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
         cairo_fill(xcb_ctx);
     }
 
+//////////////////
+cairo_text_extents_t extents;
+double x,y;
+x = resolution[0] / 2 - ((extents.width / 2) + extents.x_bearing);
+y = resolution[1] * 2/3 - ((extents.height / 2) + extents.y_bearing) + 28.0;
+
+if (pam_msg_count && pam_msg) {
+    char *message = malloc(log10(pam_msg_count)+1 + strlen(": ") + strlen(pam_msg)+2);
+    sprintf(message, "%d: %s", pam_msg_count, pam_msg);
+
+    cairo_select_font_face(pam_ctx, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(pam_ctx, 28.0);
+    cairo_text_extents (pam_ctx, pam_msg, &extents);
+
+    cairo_move_to (pam_ctx, x, y);
+    char *text;
+    text = "TEST";
+    // FIX... doesn't print...
+    //cairo_show_text (pam_ctx, message);
+    cairo_show_text (pam_ctx, text);
+    cairo_show_text (pam_ctx, pam_msg);
+    DEBUG("PRINTED %s\n", message);
+
+    free(message);
+}
+pam_msg = NULL;
+
+/* draw helping lines */
+
+cairo_set_source_rgba (pam_ctx, 1, 0.2, 0.2, 0.6);
+cairo_set_line_width (pam_ctx, 6.0);
+cairo_arc (pam_ctx, x, y, 10.0, 0, 2*M_PI);
+cairo_fill (pam_ctx);
+cairo_move_to (pam_ctx, x, 0);
+cairo_rel_line_to (pam_ctx, 0, x);
+cairo_stroke (pam_ctx);
+
+
+//////////////////
     if (unlock_indicator &&
         (unlock_state >= STATE_KEY_PRESSED || auth_state > STATE_AUTH_IDLE)) {
         cairo_scale(ctx, scaling_factor, scaling_factor);
@@ -152,6 +203,7 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
                 break;
             case STATE_AUTH_WRONG:
             case STATE_I3LOCK_LOCK_FAILED:
+            case STATE_PAM_UNKNOWN:
                 cairo_set_source_rgba(ctx, 250.0 / 255, 0, 0, 0.75);
                 break;
             default:
@@ -171,6 +223,7 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
                 break;
             case STATE_AUTH_WRONG:
             case STATE_I3LOCK_LOCK_FAILED:
+            case STATE_PAM_UNKNOWN:
                 cairo_set_source_rgb(ctx, 125.0 / 255, 51.0 / 255, 0);
                 break;
             case STATE_AUTH_IDLE:
@@ -217,6 +270,9 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
                 break;
             case STATE_I3LOCK_LOCK_FAILED:
                 text = "Lock failed!";
+                break;
+            case STATE_PAM_UNKNOWN:
+                text = "PAM MSG!";
                 break;
             default:
                 if (unlock_state == STATE_NOTHING_TO_DELETE) {
